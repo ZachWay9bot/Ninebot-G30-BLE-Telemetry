@@ -21,6 +21,11 @@ jobs:
           arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core install esp32:esp32@2.0.17 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
+      - name: Prepare Arduino sketch folder
+        run: |
+          mkdir -p /tmp/Ninebot_G30_BLE_Telemetry
+          cp Ninebot_G30_BLE_Telemetry.ino /tmp/Ninebot_G30_BLE_Telemetry/Ninebot_G30_BLE_Telemetry.ino
+
       - name: Compile for ESP32-C3 Dev Module
         run: |
-          arduino-cli compile --fqbn esp32:esp32:esp32c3 .
+          arduino-cli compile --fqbn esp32:esp32:esp32c3 /tmp/Ninebot_G30_BLE_Telemetry
