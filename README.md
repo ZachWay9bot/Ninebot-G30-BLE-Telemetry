@@ -108,12 +108,6 @@ The sketch uses libraries bundled with the Arduino ESP32 core:
 
 No separate NinebotCrypto library is required.
 
-## GitHub Actions
-
-`.github/workflows/compile.yml` performs an Arduino CLI compile check for the ESP32-C3.
-
-The workflow is intentionally pinned to Arduino-ESP32 `2.0.17` as a compatibility baseline for the legacy BLE API used by this freeze. Your locally installed core can differ; the **hardware-tested source remains the freeze file**.
-
 ## Freeze policy
 
 `v6.1` is the known-working baseline. Functional changes should be made in a new version rather than silently modifying this release.
