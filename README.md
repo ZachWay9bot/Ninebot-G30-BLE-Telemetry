@@ -1,10 +1,10 @@
 # Ninebot G30 BLE Telemetry
 
-Read-only BLE telemetry reader for the **Ninebot MAX G30** using an **ESP32-C3** and the legacy NinebotCrypto session protocol.
+BLE telemetry and protocol test project for the **Ninebot MAX G30** using an **ESP32-C3** and the legacy NinebotCrypto session protocol.
 
-> **Freeze release:** `v6.1`  
-> **Status:** Hardware-tested and working  
-> **Freeze SHA-256:** `1f8b6e0c1871de3cb3dbb3483d999f52380e301a436fac98e3e94ce327de7ebd`
+> **Frozen baseline:** `v6.1` - hardware-tested and working  
+> **Current test build:** `v6.2 DPC ON` - adds one authenticated ESC write after READY  
+> **v6.1 Freeze SHA-256:** `1f8b6e0c1871de3cb3dbb3483d999f52380e301a436fac98e3e94ce327de7ebd`
 
 ## Features
 
@@ -12,14 +12,19 @@ Read-only BLE telemetry reader for the **Ninebot MAX G30** using an **ESP32-C3**
 - Implements the working NinebotCrypto authentication flow
 - Callback-safe BLE writes to avoid GATT deadlocks
 - Handles fragmented BLE packets
-- Reads telemetry only:
+- v6.1 reads telemetry only:
   - battery percentage
   - battery voltage
   - battery current
   - battery temperatures
   - speed
   - odometer
-- Does **not** write speed limits, tuning parameters or ESC configuration
+- v6.2 keeps the same auth/telemetry stack and adds a single deferred write after `AUTH_READY`:
+  - target: ESC `0x20`
+  - command: `0x03`
+  - register: `0x76`
+  - data: `01 00`
+- No speed-limit write is included
 
 ## Tested hardware
 
@@ -71,9 +76,25 @@ A critical implementation detail is that **BLE writes must not be started from i
 | ESC `0x20` | `0x26` | Speed |
 | ESC `0x20` | `0x29` + `0x2A` | Odometer |
 
+## Versions
+
+- `Ninebot_G30_BLE_Telemetry.ino`  
+  Frozen v6.1 hardware-tested baseline. Read-only telemetry.
+
+- `Ninebot_G30_BLE_Telemetry_v6_2_DPC_ON.ino`  
+  v6.2 test build. After successful `0x5D01 / AUTH_READY`, it schedules exactly one DPC ON write from `loop()`.
+
+The logical v6.2 write frame before NinebotCrypto is:
+
+```text
+5A A5 02 3E 20 03 76 01 00
+```
+
+For the legacy unencrypted form, the corresponding checksum bytes are `25 FF`. In v6.2 they are **not appended manually** because the active NinebotCrypto session generates its own encrypted authentication trailer.
+
 ## Arduino IDE
 
-1. Open `Ninebot_G30_BLE_Telemetry.ino`.
+1. Open either `Ninebot_G30_BLE_Telemetry.ino` for the frozen v6.1 baseline or `Ninebot_G30_BLE_Telemetry_v6_2_DPC_ON.ino` for the DPC ON test build.
 2. Select **ESP32C3 Dev Module**.
 3. Select the correct COM port.
 4. Compile and flash.
@@ -119,7 +140,8 @@ The file `FREEZE.sha256` records the SHA-256 of the hardware-tested source. The 
 - A `0x5C00` response is expected until the physical power-button confirmation is accepted.
 - A single crypto-counter warning was seen during testing, but the session recovered and continued successfully.
 - BLE scanning may need more than one scan cycle before the scooter is discovered.
-- Pairing/authentication changes BLE authentication state, but this sketch does not modify riding/tuning parameters.
+- v6.1 does not modify riding/tuning parameters.
+- v6.2 intentionally performs the documented `0x76 = 0x0001` ESC write once after authentication. It is a test build until confirmed on hardware.
 
 ## References
 
