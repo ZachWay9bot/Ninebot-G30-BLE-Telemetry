@@ -1,5 +1,8 @@
 # Pairing, credential persistence and AutoAuth
 
+
+![v7.14 pairing and Self-Bound AutoAuth flow](images/pairing_autoauth_v7_14.svg)
+
 This document describes the legacy NinebotCrypto authentication used by the current `v7.14 Self-Bound AutoAuth` CYD build.
 
 ## Roles and transport

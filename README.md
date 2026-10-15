@@ -20,6 +20,16 @@ The older v6.x files remain unchanged as protocol/reference freezes. The current
 - self-bound credential persistence introduced in v7.14
 - optional explicit Segway app key (`<SERIAL>_decrypt`) support remains available
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/images/dashboard_v7_14_ui_render.svg" width="360" alt="ScooterDash v7.14 CYD dashboard UI render">
+</p>
+
+<p align="center"><em>v7.14 UI render using demo telemetry values. This is a documentation render, not a photograph of the hardware.</em></p>
+
+![Pairing and Self-Bound AutoAuth flow](docs/images/pairing_autoauth_v7_14.svg)
+
 ## BLE service
 
 | Function | UUID |
