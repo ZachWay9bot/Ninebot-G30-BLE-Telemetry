@@ -1,5 +1,37 @@
 # Changelog
 
+## v7.14 - CYD Self-Bound AutoAuth
+
+Current 240x320 portrait dashboard build for the classic ESP32 CYD.
+
+### Added
+
+- target-locked automatic reconnect to the previously authenticated scooter
+- self-bound dashboard credential persisted only after successful `0x5D01`
+- later-boot direct `0x5D` AutoAuth attempt using `SHA1(stored_key || BLE_key)`
+- clean fallback to one fresh normal button pairing when a stored credential is rejected
+- optional explicit Segway app key support (`APPKEY=<32hex>`)
+- DPC `0x76 = 0x0001` write with read-back verification and bounded retry
+- 100 ms telemetry scheduler with speed/current prioritized
+- optimized LVGL dirty-region rendering for 240x320 portrait CYD
+
+### Pairing behavior
+
+First pairing remains the known-good G30 path:
+
+`0x5B -> 0x5C -> 0x5C00 -> power button -> 0x5C01 -> 0x5D -> 0x5D01`
+
+After `0x5D01`, v7.14 stores the accepted dashboard key and exact scooter serial. On later boots it first tries direct `0x5D` without `0x5C`, so a newly accepted bound session does not request another power-button confirmation.
+
+See `docs/PAIRING.md` for the full state machine and validation notes.
+
+### Compatibility / validation
+
+- Normal G30 button pairing: hardware-tested.
+- DPC `0x76 = 1` plus readback: hardware-tested in the current dashboard test flow.
+- Target-locked AutoConnect: hardware-tested in the current dashboard test flow.
+- Self-bound direct reconnect: current v7.14 AutoAuth path; acceptance can depend on BLE/dashboard firmware.
+
 ## v6.2 - DPC ON test build
 
 Based on the frozen v6.1 callback-safe auth/telemetry implementation.

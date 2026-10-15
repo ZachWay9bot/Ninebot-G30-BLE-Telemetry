@@ -1,0 +1,26 @@
+ScooterDash v7.14 - Self-Bound AutoAuth
+
+Goal:
+  After ONE successful normal button pairing, future boots authenticate without
+  pressing the scooter power button.
+
+Flow first time / after invalid key:
+  0x5B INIT -> fresh 16-byte dashboard key -> 0x5C -> press power once ->
+  0x5C01 -> session key -> 0x5D(serial) -> 0x5D01 READY.
+  Only after 0x5D01 the accepted key is stored in NVS with the scooter serial.
+
+Flow later boots:
+  0x5B INIT -> load stored key for exact serial -> SHA1(KEY || BLE_KEY) ->
+  direct 0x5D(serial), counter 2 -> 0x5D01 READY.
+  No 0x5C is sent, so no power-button confirmation is requested.
+
+Failure safety:
+  If the stored key is rejected or direct 0x5D times out, it is deleted,
+  BLE reconnects cleanly, and one normal fresh-key button pairing is requested.
+  There is no loop that keeps retrying a rejected credential.
+
+Explicit APPKEY=<32hex> support from v7.11 remains. If a real Segway app key is
+provisioned, it has priority over the dashboard's self-bound key.
+
+AutoConnect target lock, DPC 0x76 verification and 100 ms telemetry scheduler
+remain unchanged from v7.13.

@@ -1,39 +1,24 @@
 # Ninebot G30 BLE Telemetry
 
-BLE telemetry and protocol test project for the **Ninebot MAX G30** using an **ESP32-C3** and the legacy NinebotCrypto session protocol.
+BLE telemetry, authentication and dashboard experiments for the **Ninebot MAX G30** using the legacy NinebotCrypto session protocol.
 
-> **Frozen baseline:** `v6.1` - hardware-tested and working  
-> **Current test build:** `v6.2 DPC ON` - adds one authenticated ESC write after READY  
-> **v6.1 Freeze SHA-256:** `1f8b6e0c1871de3cb3dbb3483d999f52380e301a436fac98e3e94ce327de7ebd`
+> **Frozen protocol baseline:** `v6.1` - hardware-tested read-only telemetry  
+> **DPC test baseline:** `v6.2 DPC ON` - authenticated `0x76 = 0x0001` write after READY  
+> **Current CYD dashboard:** `v7.14 Self-Bound AutoAuth` - 240x320 portrait, AutoConnect, fast telemetry, DPC verify and persistent self-bound authentication
 
-## Features
+The older v6.x files remain unchanged as protocol/reference freezes. The current CYD build lives in `CYD_v7_14_SelfBoundAutoAuth/`.
 
-- Connects to the Ninebot dashboard over BLE / Nordic UART Service
-- Implements the working NinebotCrypto authentication flow
-- Callback-safe BLE writes to avoid GATT deadlocks
-- Handles fragmented BLE packets
-- v6.1 reads telemetry only:
-  - battery percentage
-  - battery voltage
-  - battery current
-  - battery temperatures
-  - speed
-  - odometer
-- v6.2 keeps the same auth/telemetry stack and adds a single deferred write after `AUTH_READY`:
-  - target: ESC `0x20`
-  - command: `0x03`
-  - register: `0x76`
-  - data: `01 00`
-- No speed-limit write is included
+## Current v7.14 highlights
 
-## Tested hardware
-
-- ESP32-C3 Dev Module
-- Ninebot MAX G30
-- Dashboard name observed: `NBScooter2088`
-- Serial monitor: `115200 baud`
-
-The code is not tied to that exact advertised name; the tested name is documented so the successful hardware setup remains reproducible.
+- Classic ESP32-2432S028R / "Cheap Yellow Display" (ILI9341, 240x320 portrait)
+- Ninebot legacy BLE / Nordic UART Service
+- callback-safe NinebotCrypto transport; BLE writes stay outside notify callbacks
+- target-locked AutoConnect to the previously authenticated scooter
+- optimized LVGL dirty-region renderer
+- 100 ms telemetry scheduler with speed/current prioritized
+- DPC register `0x76 = 0x0001` after READY, with read-back verification
+- self-bound credential persistence introduced in v7.14
+- optional explicit Segway app key (`<SERIAL>_decrypt`) support remains available
 
 ## BLE service
 
@@ -44,26 +29,85 @@ The code is not tied to that exact advertised name; the tested name is documente
 | Notify / TX characteristic | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` |
 | CCCD | `0x2902` |
 
-## Authentication flow
+## Pairing and AutoAuth
 
-The tested scooter uses:
+### First pairing
+
+With no stored credential, v7.14 uses the normal G30 pairing sequence:
 
 ```text
 BLE connect
   -> enable notifications
   -> 0x5B INIT
-  -> receive BLE random/key + serial number
-  -> 0x5C AUTH/PING
-  -> 0x5C00 while waiting for physical confirmation
-  -> press scooter power button
+  -> receive BLE key + scooter serial
+  -> generate fresh 16-byte dashboard key
+  -> 0x5C PING with that key
+  -> 0x5C00 while confirmation is pending
+  -> press scooter power button once
   -> 0x5C01
-  -> switch session key
-  -> 0x5D PAIR
+  -> session key = SHA1(dashboard_key || BLE_key)
+  -> 0x5D PAIR with scooter serial
   -> 0x5D01
   -> READY
 ```
 
-A critical implementation detail is that **BLE writes must not be started from inside the notify callback**. The callback only decodes the packet and schedules the next transmission. The actual GATT write is performed later from `loop()`.
+The dashboard key is persisted **only after a successful `0x5D01`** and is stored together with the exact scooter serial. A failed or incomplete pairing is never promoted to a valid credential.
+
+### Later boots: v7.14 Self-Bound AutoAuth
+
+If an accepted dashboard key exists for the exact scooter serial, v7.14 first tries the already-bound-client path:
+
+```text
+0x5B INIT
+  -> load stored dashboard key for exact serial
+  -> session key = SHA1(stored_key || BLE_key)
+  -> direct 0x5D PAIR with scooter serial
+  -> 0x5D01
+  -> READY
+```
+
+No `0x5C` is sent in this path, so no new power-button confirmation is requested.
+
+If the stored credential is rejected or direct `0x5D` times out, v7.14 clears that credential, reconnects cleanly and falls back to one normal fresh-key button pairing. It does not keep retrying a rejected credential forever.
+
+> **Validation note:** the normal G30 `0x5B -> 0x5C -> power button -> 0x5D01` path is hardware-tested. The v7.14 self-bound direct reconnect is the current AutoAuth path and can depend on the BLE/dashboard firmware accepting that stored client binding.
+
+Full details: [`docs/PAIRING.md`](docs/PAIRING.md)
+
+## Optional official Segway app key
+
+A real 16-byte Segway app key (`<SERIAL>_decrypt`) can be provisioned over Serial and takes priority over the self-bound dashboard credential:
+
+```text
+APPKEY?                  show key status
+APPKEY=<32 hex chars>    store 16-byte Segway app key
+APPKEY=CLEAR             clear it
+```
+
+Do not confuse this with the temporary `APP random/key` printed during a fresh button pairing.
+
+## AutoConnect target lock
+
+After the first successful authentication, the dashboard stores the scooter name and only reconnects to that target on later scans.
+
+```text
+TARGET?       show stored target
+TARGET=CLEAR clear target binding
+```
+
+If the scooter is powered off, the dashboard simply keeps scanning. Empty scan cycles are normal and do not trigger a reboot.
+
+## DPC
+
+After authentication, the current dashboard build writes ESC register `0x76 = 0x0001`, waits briefly, then reads `0x76` back. A mismatch/timeout is retried with a bounded retry count. A slow periodic check keeps DPC enabled without polluting the fast telemetry loop.
+
+The logical write payload before NinebotCrypto is:
+
+```text
+5A A5 02 3E 20 03 76 01 00
+```
+
+The legacy raw CRC bytes (`25 FF`) are not appended manually inside the active encrypted session.
 
 ## Telemetry registers
 
@@ -76,80 +120,34 @@ A critical implementation detail is that **BLE writes must not be started from i
 | ESC `0x20` | `0x26` | Speed |
 | ESC `0x20` | `0x29` + `0x2A` | Odometer |
 
-## Versions
+## Repository layout
 
-- `Ninebot_G30_BLE_Telemetry.ino`  
-  Frozen v6.1 hardware-tested baseline. Read-only telemetry.
+- `Ninebot_G30_BLE_Telemetry.ino` - frozen v6.1 read-only protocol baseline
+- `Ninebot_G30_BLE_Telemetry_v6_2_DPC_ON.ino` - v6.2 DPC test baseline
+- `CYD_v7_14_SelfBoundAutoAuth/` - current classic-ESP32 CYD dashboard build
+- `docs/PAIRING.md` - pairing, credential persistence and AutoAuth details
+- `docs/PROTOCOL.md` / `docs/TESTED.md` - older protocol/reference notes
 
-- `Ninebot_G30_BLE_Telemetry_v6_2_DPC_ON.ino`  
-  v6.2 test build. After successful `0x5D01 / AUTH_READY`, it schedules exactly one DPC ON write from `loop()`.
+## CYD build notes
 
-The logical v6.2 write frame before NinebotCrypto is:
+Target: common **ESP32-2432S028R** with ILI9341 240x320 TFT.
 
-```text
-5A A5 02 3E 20 03 76 01 00
-```
-
-For the legacy unencrypted form, the corresponding checksum bytes are `25 FF`. In v6.2 they are **not appended manually** because the active NinebotCrypto session generates its own encrypted authentication trailer.
-
-## Arduino IDE
-
-1. Open either `Ninebot_G30_BLE_Telemetry.ino` for the frozen v6.1 baseline or `Ninebot_G30_BLE_Telemetry_v6_2_DPC_ON.ino` for the DPC ON test build.
-2. Select **ESP32C3 Dev Module**.
-3. Select the correct COM port.
-4. Compile and flash.
-5. Open Serial Monitor at **115200 baud**.
-6. When the log repeatedly shows `0x5C00`, briefly press the scooter power button.
-7. Wait for:
-
-```text
-*** AUTHENTIFIZIERUNG ERFOLGREICH - READY ***
-```
-
-You should then see output similar to:
-
-```text
->>> AKKU: 100 %
->>> BAT VOLTAGE: 41.37 V
->>> BAT CURRENT: 0.23 A
->>> BAT TEMP: 20 / 20 C
->>> SPEED: 22.2 km/h
->>> ODO: 48.357 km
-```
+The project includes `CYD_TFT_eSPI_User_Setup.h`. TFT_eSPI compiles its own setup separately, so copy/select the equivalent setup in TFT_eSPI before building. Use a classic ESP32 target such as **ESP32 Dev Module** and a large application partition if needed. PSRAM is not required.
 
 ## Dependencies
 
-The sketch uses libraries bundled with the Arduino ESP32 core:
+- Arduino ESP32 core BLE stack (`BLEDevice.h`, `BLEUtils.h`, `BLEScan.h`, ...)
+- mbedTLS AES/SHA1 headers provided by the ESP32 core
+- LVGL 9.x
+- TFT_eSPI
 
-- `BLEDevice.h`
-- `BLEUtils.h`
-- `BLEScan.h`
-- `BLEAdvertisedDevice.h`
-- mbedTLS AES/SHA1 headers
-
-No separate NinebotCrypto library is required.
-
-## Freeze policy
-
-`v6.1` is the known-working baseline. Functional changes should be made in a new version rather than silently modifying this release.
-
-The file `FREEZE.sha256` records the SHA-256 of the hardware-tested source. The repository copy is byte-for-byte identical to the frozen sketch except for its filename.
-
-## Known observations
-
-- A `0x5C00` response is expected until the physical power-button confirmation is accepted.
-- A single crypto-counter warning was seen during testing, but the session recovered and continued successfully.
-- BLE scanning may need more than one scan cycle before the scooter is discovered.
-- v6.1 does not modify riding/tuning parameters.
-- v6.2 intentionally performs the documented `0x76 = 0x0001` ESC write once after authentication. It is a test build until confirmed on hardware.
+No separate NinebotCrypto library is required; the legacy crypto/session handling is implemented in the project source.
 
 ## References
 
-Protocol behavior was cross-checked against community reverse-engineering projects:
-
 - ScooterHacking NinebotCrypto: https://github.com/scooterhacking/NinebotCrypto
 - ninebot-ble: https://github.com/ownbee/ninebot-ble
-- Community register database: https://github.com/jx-grxf/scooter-tuning-db
+- ha-ninebot: https://github.com/BobMcGlobus/ha-ninebot
 
 ## License
 
