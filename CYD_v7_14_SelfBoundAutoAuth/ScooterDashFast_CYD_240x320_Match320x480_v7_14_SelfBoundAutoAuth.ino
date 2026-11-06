@@ -3,7 +3,8 @@
 #include <math.h>
 #include <esp_heap_caps.h>
 #include "dashboard.h"
-#include "ninebot_telemetry.h"\n#include "fusion_ui.h"
+#include "ninebot_telemetry.h"
+#include "fusion_ui.h"
 
 static constexpr bool DEMO_MODE = false;
 static constexpr uint8_t DISPLAY_ROTATION = 0; // CYD portrait: logical 240 x 320. Use 2 if mounted upside-down.
