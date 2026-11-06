@@ -1,0 +1,56 @@
+name: Arduino IDE package
+
+on:
+  push:
+    branches:
+      - fusion-opendash-lvgl-v1
+    paths:
+      - "arduino/G30_Fusion_Arduino/**"
+      - ".github/workflows/arduino-package.yml"
+  workflow_dispatch:
+
+jobs:
+  arduino:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Arduino CLI
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR="$HOME/bin" sh
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Install ESP32 core 2.0.14
+        run: |
+          arduino-cli config init
+          arduino-cli config set board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@2.0.14
+
+      - name: Install libraries
+        run: |
+          arduino-cli lib install "lvgl@9.4.0"
+          arduino-cli lib install "TFT_eSPI@2.5.43"
+          mkdir -p "$HOME/Arduino/libraries"
+          git clone --depth 1 --branch v1.4 https://github.com/PaulStoffregen/XPT2046_Touchscreen.git "$HOME/Arduino/libraries/XPT2046_Touchscreen"
+
+      - name: Compile Arduino sketch
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
+            --output-dir arduino_build \
+            arduino/G30_Fusion_Arduino
+
+      - name: Package Arduino IDE sketch
+        run: |
+          cp arduino_build/G30_Fusion_Arduino.ino.bin arduino/G30_Fusion_Arduino/G30_Fusion_Arduino.ino.bin
+          cp arduino_build/G30_Fusion_Arduino.ino.bootloader.bin arduino/G30_Fusion_Arduino/G30_Fusion_Arduino.ino.bootloader.bin
+          cp arduino_build/G30_Fusion_Arduino.ino.partitions.bin arduino/G30_Fusion_Arduino/G30_Fusion_Arduino.ino.partitions.bin
+          zip -r G30_Fusion_v1_Arduino_IDE.zip arduino/G30_Fusion_Arduino
+
+      - name: Upload Arduino package
+        uses: actions/upload-artifact@v4
+        with:
+          name: G30-Fusion-v1-Arduino-IDE
+          path: G30_Fusion_v1_Arduino_IDE.zip

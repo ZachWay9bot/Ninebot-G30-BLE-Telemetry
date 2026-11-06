@@ -4,11 +4,14 @@
 #include <esp_heap_caps.h>
 #include "dashboard.h"
 #include "ninebot_telemetry.h"
+#include "fusion_ui.h"
 
 static constexpr bool DEMO_MODE = false;
 static constexpr uint8_t DISPLAY_ROTATION = 0; // CYD portrait: logical 240 x 320. Use 2 if mounted upside-down.
 static constexpr bool DISPLAY_INVERT = false;
 static constexpr int BACKLIGHT_PIN = 21;       // Standard ESP32-2432S028R CYD backlight
+static constexpr int BACKLIGHT_CH = 0;
+static float ui_speed_kmh = 0.0f;
 
 static TFT_eSPI tft;
 static uint8_t *draw_buffer = nullptr;
@@ -41,6 +44,12 @@ static bool delta_mode_active = false;
 
 static uint32_t tick_ms() { return millis(); }
 
+static void setBacklightPercent(uint8_t percent) {
+    if (percent < 10) percent = 10;
+    if (percent > 100) percent = 100;
+    ledcWrite(BACKLIGHT_CH, (255U * percent) / 100U);
+}
+
 static void display_flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels) {
     const uint32_t width = area->x2 - area->x1 + 1;
     const uint32_t height = area->y2 - area->y1 + 1;
@@ -71,6 +80,7 @@ static void feedNinebotToDashboard(uint32_t now) {
     data.connected = src.connected && src.ready && fresh;
     data.demo = false;
     data.speed_kmh = src.speed_kmh;
+    ui_speed_kmh = isfinite(src.speed_kmh) ? src.speed_kmh : 0.0f;
     data.battery_percent = src.battery_percent;
     data.voltage_v = src.voltage_v;
     data.battery_current_a = src.battery_current_a;
@@ -113,8 +123,9 @@ void setup() {
     Serial.println("[BOOT 1] CYD 240x320 portrait MATCH v7.14");
     Serial.printf("[BOOT 1] free heap=%u\n", (unsigned)ESP.getFreeHeap());
 
-    pinMode(BACKLIGHT_PIN, OUTPUT);
-    digitalWrite(BACKLIGHT_PIN, HIGH);
+    ledcSetup(BACKLIGHT_CH, 5000, 8);
+    ledcAttachPin(BACKLIGHT_PIN, BACKLIGHT_CH);
+    setBacklightPercent(100);
 
     Serial.println("[BOOT 2] BLE init");
     ninebotTelemetryBegin();
@@ -142,11 +153,17 @@ void setup() {
 
     Serial.println("[BOOT 7] dashboard create");
     if (!dashboard_create(lv_screen_active())) Serial.println("Dashboard creation failed");
+
+    Serial.println("[BOOT 7b] fusion UI / touch");
+    if (!fusionUiBegin(lv_screen_active(), DISPLAY_ROTATION, setBacklightPercent)) {
+        Serial.println("[FUSION-UI] disabled; dashboard remains usable.");
+    }
+
     dashboard_tick(millis());
     lv_timer_handler();
 
     Serial.println("[BOOT 8] setup complete");
-    Serial.println("ScooterDash CYD 240x320 PORTRAIT v7.14 SelfBound AutoAuth + AutoConnect + FastTelemetry + DPC | LVGL 9.4");
+    Serial.println("ScooterDash CYD 240x320 FUSION v1 | v7.14 AutoAuth + DPC + LVGL 9.4 + Touch");
 }
 
 void loop() {
@@ -175,6 +192,14 @@ void loop() {
                 if (cmd == 'b') dashboard_set_theme(DASH_BLUE);
                 if (cmd == 'r') dashboard_set_theme(DASH_RED);
                 if (cmd == 'p') performance_log = !performance_log;
+            } else if (serialLine.equalsIgnoreCase("CAL")) {
+                fusionUiStartCalibration();
+                Serial.println("[FUSION-UI] touch calibration started.");
+            } else if (serialLine.equalsIgnoreCase("UI?")) {
+                Serial.printf("[FUSION-UI] brightness=%u touch_lock=%s overlay=%s\n",
+                              (unsigned)fusionUiBrightness(),
+                              fusionUiTouchLocked() ? "ON" : "OFF",
+                              fusionUiOverlayOpen() ? "OPEN" : "CLOSED");
             } else if (serialLine.equalsIgnoreCase("TARGET?")) {
                 if (ninebotTelemetryHasAutoConnectTarget()) {
                     Serial.print("[AUTOCONNECT] Ziel: ");
@@ -199,7 +224,7 @@ void loop() {
                     Serial.println("[AUTH-APP] Ungueltig. Erwartet: APPKEY=<32 Hex-Zeichen>");
                 }
             } else if (serialLine.length()) {
-                Serial.println("Serial: b / r / p / TARGET? / TARGET=CLEAR / APPKEY? / APPKEY=<32hex> / APPKEY=CLEAR");
+                Serial.println("Serial: b / r / p / CAL / UI? / TARGET? / TARGET=CLEAR / APPKEY? / APPKEY=<32hex> / APPKEY=CLEAR");
             }
             serialLine = "";
         } else if (serialLine.length() < 96) {
@@ -207,6 +232,7 @@ void loop() {
         }
     }
 
+    fusionUiTick(now, ui_speed_kmh);
     dashboard_tick(now);
     uint32_t wait = lv_timer_handler();
     now = millis();
