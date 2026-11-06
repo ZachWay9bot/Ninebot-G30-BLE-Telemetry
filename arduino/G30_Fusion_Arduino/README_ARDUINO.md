@@ -16,8 +16,9 @@
    - XPT2046_Touchscreen 1.4.x
 4. G30_Fusion_Arduino.ino öffnen.
 5. Board: "ESP32 Dev Module".
-6. Richtigen COM-Port wählen.
-7. Upload.
+6. Tools -> Partition Scheme -> "Huge APP (3MB No OTA/1MB SPIFFS)" wählen.
+7. Richtigen COM-Port wählen.
+8. Upload.
 
 Die Dateien build_opt.h und partitions.csv müssen im Sketchordner bleiben.
 Sie konfigurieren TFT_eSPI/LVGL und die 3-MB-App-Partition automatisch.
