@@ -241,7 +241,7 @@ static void open_settings_internal() {
     overlay_open = true;
     show_page(settings_page);
     lv_obj_remove_flag(overlay, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(overlay);
+    lv_obj_move_to_index(overlay, -1);
     lv_obj_add_flag(settings_button, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -404,7 +404,7 @@ static void start_calibration(bool return_to_settings) {
     cal_samples = 0;
     show_page(cal_page);
     lv_obj_remove_flag(overlay, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(overlay);
+    lv_obj_move_to_index(overlay, -1);
     lv_obj_add_flag(settings_button, LV_OBJ_FLAG_HIDDEN);
     update_cal_target();
 }
@@ -489,7 +489,7 @@ static void build_info() {
     lv_obj_set_width(info_text, 202);
     lv_obj_set_style_text_font(info_text, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(info_text, col(0xf3f8ff), 0);
-    lv_label_set_long_mode(info_text, LV_LABEL_LONG_WRAP);
+    lv_label_set_long_mode(info_text, LV_LABEL_LONG_MODE_WRAP);
     refresh_info();
 }
 
