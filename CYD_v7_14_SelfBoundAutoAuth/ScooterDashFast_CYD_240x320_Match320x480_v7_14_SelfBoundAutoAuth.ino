@@ -191,6 +191,14 @@ void loop() {
                 if (cmd == 'b') dashboard_set_theme(DASH_BLUE);
                 if (cmd == 'r') dashboard_set_theme(DASH_RED);
                 if (cmd == 'p') performance_log = !performance_log;
+            } else if (serialLine.equalsIgnoreCase("CAL")) {
+                fusionUiStartCalibration();
+                Serial.println("[FUSION-UI] touch calibration started.");
+            } else if (serialLine.equalsIgnoreCase("UI?")) {
+                Serial.printf("[FUSION-UI] brightness=%u touch_lock=%s overlay=%s\n",
+                              (unsigned)fusionUiBrightness(),
+                              fusionUiTouchLocked() ? "ON" : "OFF",
+                              fusionUiOverlayOpen() ? "OPEN" : "CLOSED");
             } else if (serialLine.equalsIgnoreCase("TARGET?")) {
                 if (ninebotTelemetryHasAutoConnectTarget()) {
                     Serial.print("[AUTOCONNECT] Ziel: ");
@@ -215,7 +223,7 @@ void loop() {
                     Serial.println("[AUTH-APP] Ungueltig. Erwartet: APPKEY=<32 Hex-Zeichen>");
                 }
             } else if (serialLine.length()) {
-                Serial.println("Serial: b / r / p / TARGET? / TARGET=CLEAR / APPKEY? / APPKEY=<32hex> / APPKEY=CLEAR");
+                Serial.println("Serial: b / r / p / CAL / UI? / TARGET? / TARGET=CLEAR / APPKEY? / APPKEY=<32hex> / APPKEY=CLEAR");
             }
             serialLine = "";
         } else if (serialLine.length() < 96) {
