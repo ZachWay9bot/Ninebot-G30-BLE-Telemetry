@@ -22,8 +22,50 @@ jobs:
         run: pip install platformio
       - name: Build CYD Fusion
         run: pio run -e cyd_fusion
-      - name: Upload firmware
+      - name: Build merged full-flash image
+        run: |
+          python "$HOME/.platformio/packages/tool-esptoolpy/esptool.py" --chip esp32 merge_bin \
+            -o G30_Fusion_v1_FULLFLASH.bin \
+            --flash_mode dio --flash_freq 40m --flash_size 4MB \
+            0x1000 .pio/build/cyd_fusion/bootloader.bin \
+            0x8000 .pio/build/cyd_fusion/partitions.bin \
+            0xE000 .pio/build/cyd_fusion/boot_app0.bin \
+            0x10000 .pio/build/cyd_fusion/firmware.bin
+      - name: Create Windows flash scripts
+        run: |
+          cat > FLASH_FULL.cmd <<'EOF'
+          @echo off
+          setlocal
+          echo ============================================================
+          echo G30 CYD Fusion v1 - FULL FLASH
+          echo ACHTUNG: Nur fuer ESP32-2432S028R CYD, NICHT fuer den Scooter-ESC!
+          echo ============================================================
+          set /p PORT=COM-Port eingeben, z.B. COM7: 
+          py -m esptool --chip esp32 --port %PORT% --baud 460800 write_flash 0x0 G30_Fusion_v1_FULLFLASH.bin
+          if errorlevel 1 (
+            echo.
+            echo FEHLER. Falls "Failed to connect": BOOT gedrueckt halten, EN kurz druecken, BOOT loslassen.
+            pause
+            exit /b 1
+          )
+          echo.
+          echo FLASH OK. CYD startet neu.
+          pause
+          EOF
+          cat > INSTALL_ESPTOOL.cmd <<'EOF'
+          @echo off
+          py -m pip install --upgrade esptool
+          pause
+          EOF
+      - name: Upload firmware package
         uses: actions/upload-artifact@v4
         with:
-          name: G30-Fusion-v1
-          path: .pio/build/cyd_fusion/firmware.bin
+          name: G30-Fusion-v1-FLASH-PACK
+          path: |
+            G30_Fusion_v1_FULLFLASH.bin
+            FLASH_FULL.cmd
+            INSTALL_ESPTOOL.cmd
+            .pio/build/cyd_fusion/firmware.bin
+            .pio/build/cyd_fusion/bootloader.bin
+            .pio/build/cyd_fusion/partitions.bin
+            .pio/build/cyd_fusion/boot_app0.bin
