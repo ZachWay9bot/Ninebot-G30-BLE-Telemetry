@@ -336,10 +336,15 @@ static void finish_calibration() {
         cal.magic = 0;
         cal_step = 0;
         if (cal_text) lv_label_set_text(cal_text, "Calibration failed\nTry again");
+        update_cal_target();
+        Serial.println("[FUSION-UI] calibration rejected: raw span too small.");
         return;
     }
 
     save_cal();
+    Serial.printf("[FUSION-UI] calibration OK | swap=%u ax=%ld..%ld ay=%ld..%ld\n",
+                  (unsigned)cal.swap, (long)cal.ax0, (long)cal.ax1,
+                  (long)cal.ay0, (long)cal.ay1);
     calibrating = false;
 
     if (calibration_return_to_settings) {
@@ -580,6 +585,10 @@ void fusionUiTick(uint32_t, float speedKmh) {
 
 void fusionUiOpenSettings() {
     open_settings_internal();
+}
+
+void fusionUiStartCalibration() {
+    if (overlay) start_calibration(false);
 }
 
 void fusionUiCloseOverlay() {
