@@ -38,7 +38,7 @@ jobs:
       - name: Compile Arduino sketch
         run: |
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32 \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app" \
             --output-dir arduino_build \
             arduino/G30_Fusion_Arduino
 
