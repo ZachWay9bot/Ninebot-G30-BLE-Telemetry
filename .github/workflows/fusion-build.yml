@@ -1,0 +1,24 @@
+name: Fusion CYD build
+
+on:
+  push:
+    branches:
+      - fusion-opendash-lvgl-v1
+  pull_request:
+    paths:
+      - "CYD_v7_14_SelfBoundAutoAuth/**"
+      - "platformio.ini"
+      - ".github/workflows/fusion-build.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Build CYD Fusion
+        run: pio run -e cyd_fusion
