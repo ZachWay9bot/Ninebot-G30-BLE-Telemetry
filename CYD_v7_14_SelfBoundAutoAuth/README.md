@@ -1,4 +1,4 @@
-# ScooterDashFast CYD 240x320 Portrait v7.14
+# ScooterDashFast CYD 240x320 Portrait v7.14 + Fusion UI v1
 
 Current classic-ESP32 CYD dashboard build for the Ninebot MAX G30 legacy NinebotCrypto protocol.
 
@@ -66,9 +66,26 @@ TARGET?                  show AutoConnect target
 TARGET=CLEAR             clear AutoConnect target
 b                        blue theme
 r                        red theme
-p                        toggle performance logging
+p                        toggle performance logging\nCAL                      restart touch calibration\nUI?                      show Fusion UI status
 ```
 
 ## Build
 
 Use a classic ESP32 board target matching the CYD, typically `ESP32 Dev Module`. A large APP partition is recommended for the BLE + LVGL build. PSRAM is not required.
+
+
+## Fusion pinout
+
+The common ESP32-2432S028R uses a separate SPI bus for the XPT2046 touch controller:
+
+- touch CS 33
+- touch IRQ 36
+- touch SCLK 25
+- touch MISO 39
+- touch MOSI 32
+
+The TFT remains on GPIO 12/13/14/15/2 and is therefore not moved by the Fusion UI.
+
+## Safety / rollback
+
+The Fusion UI lives on branch `fusion-opendash-lvgl-v1`. The original v7.14 files on `main` remain the rollback baseline. No changes to `ninebot_telemetry.cpp` are required for Fusion UI v1.
