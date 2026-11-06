@@ -15,7 +15,8 @@ typedef void (*fusion_backlight_cb_t)(uint8_t percent);
  */
 bool fusionUiBegin(lv_obj_t *parent, uint8_t displayRotation, fusion_backlight_cb_t backlightCb);
 void fusionUiTick(uint32_t nowMs, float speedKmh);
-void fusionUiOpenSettings();\nvoid fusionUiStartCalibration();
+void fusionUiOpenSettings();
+void fusionUiStartCalibration();
 void fusionUiCloseOverlay();
 bool fusionUiOverlayOpen();
 uint8_t fusionUiBrightness();
