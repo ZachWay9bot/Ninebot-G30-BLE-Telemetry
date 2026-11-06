@@ -22,3 +22,8 @@ jobs:
         run: pip install platformio
       - name: Build CYD Fusion
         run: pio run -e cyd_fusion
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: G30-Fusion-v1
+          path: .pio/build/cyd_fusion/firmware.bin
