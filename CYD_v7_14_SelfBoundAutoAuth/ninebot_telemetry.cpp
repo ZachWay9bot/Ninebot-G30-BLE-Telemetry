@@ -1573,8 +1573,18 @@ void handlePlainPacket(const uint8_t* plain,
       Serial.println("Auth READY. Setze und pruefe DPC-Register 0x76, danach startet Telemetrie ...");
 
       telemetryWaiting = false;
+      telemetryPendingTarget = 0;
+      telemetryPendingReg = 0;
+      telemetryPendingTimeoutMs = SPEED_REPLY_TIMEOUT_MS;
       lastTelemetry = 0;
-      telemetryStep = 0;
+      lastSpeedPollMs = 0;
+      lastBmsCurrentPollMs = 0;
+      lastBmsSlowPollMs = 0;
+      lastEscSlowPollMs = 0;
+      bmsSlowStep = 0;
+      escSlowStep = 0;
+      bmsConsecutiveTimeouts = 0;
+      bmsBackoffUntilMs = 0;
       dpcAttempts = 0;
       dpcLastAction = 0;
       dpcLastPeriodicCheck = millis();
