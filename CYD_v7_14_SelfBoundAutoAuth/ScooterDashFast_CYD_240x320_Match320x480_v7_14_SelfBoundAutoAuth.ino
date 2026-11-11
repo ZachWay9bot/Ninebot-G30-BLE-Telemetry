@@ -88,10 +88,13 @@ static void feedNinebotToDashboard(uint32_t now) {
                            src.speed_kmh > DELTA_SWITCH_KMH;
     if (new_delta != delta_mode_active) {
         delta_mode_active = new_delta;
+        // Machine-facing Delta control. NEVER gate this line behind diagnostics.
         Serial.printf("RELAY:%d\n", delta_mode_active ? 1 : 0);
+#if NB_RUNTIME_DIAG
         Serial.printf("[DELTA] %s at %.1f km/h\n",
                       delta_mode_active ? "ON" : "OFF",
                       isfinite(src.speed_kmh) ? src.speed_kmh : 0.0f);
+#endif
     }
     data.delta_active = delta_mode_active;
     data.max_speed_kmh = NAN;
@@ -213,7 +216,7 @@ void loop() {
 
     if ((uint32_t)(now - last_log) >= 1000) {
         uint32_t elapsed = now - last_log;
-        if (performance_log) {
+        if (NB_RUNTIME_DIAG && performance_log) {
             Serial.printf("updates/s=%.1f | pixels/s=%lu | SPI busy=%.1f%% | heap=%u\n",
                           frames_sent * 1000.0f / elapsed,
                           (unsigned long)(pixels_sent * 1000ULL / elapsed),
