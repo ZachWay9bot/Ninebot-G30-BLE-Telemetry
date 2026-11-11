@@ -368,11 +368,42 @@ volatile PendingTx pendingTx = TX_NONE;
 unsigned long authLastSend = 0;
 unsigned long readySince = 0;
 
-// only one telemetry request at a time
+// Only one telemetry request at a time, but track exactly which reply may
+// release the wait state. Late BMS replies must never unlock a newer speed read.
 bool telemetryWaiting = false;
 unsigned long telemetrySentAt = 0;
 unsigned long lastTelemetry = 0;
-uint8_t telemetryStep = 0;
+static volatile uint8_t telemetryPendingTarget = 0;
+static volatile uint8_t telemetryPendingReg = 0;
+static volatile unsigned long telemetryPendingTimeoutMs = 180;
+
+// Priority scheduler. Speed is intentionally independent of slow telemetry.
+static unsigned long lastSpeedPollMs = 0;
+static unsigned long lastBmsCurrentPollMs = 0;
+static unsigned long lastBmsSlowPollMs = 0;
+static unsigned long lastEscSlowPollMs = 0;
+static uint8_t bmsSlowStep = 0;
+static uint8_t escSlowStep = 0;
+
+static const unsigned long SPEED_POLL_INTERVAL_MS = 200;   // target 5 Hz
+static const unsigned long SPEED_REPLY_TIMEOUT_MS = 180;
+static const unsigned long OPTIONAL_REPLY_TIMEOUT_MS = 140;
+static const unsigned long BMS_CURRENT_INTERVAL_MS = 750;
+static const unsigned long BMS_SLOW_INTERVAL_MS = 2500;
+static const unsigned long ESC_SLOW_INTERVAL_MS = 2500;
+static const unsigned long BMS_BACKOFF_MS = 30000;
+
+static volatile bool bmsEverReplied = false;
+static volatile uint8_t bmsConsecutiveTimeouts = 0;
+static volatile unsigned long bmsBackoffUntilMs = 0;
+
+static volatile uint32_t diagSpeedTimeouts = 0;
+static volatile uint32_t diagBmsTimeouts = 0;
+static volatile uint32_t diagOtherTimeouts = 0;
+static volatile uint32_t diagLateReplies = 0;
+static volatile uint32_t diagLastSpeedRttMs = 0;
+static volatile uint32_t diagSpeedRttSumMs = 0;
+static volatile uint32_t diagSpeedRttCount = 0;
 
 // Passive stock-dashboard speed path.
 // When BLE117 forwards ESC->BLE CMD64 to the phone session, status[4] is the
@@ -422,6 +453,27 @@ static NinebotTelemetrySnapshot telemetrySnapshot;
 static portMUX_TYPE telemetryMux = portMUX_INITIALIZER_UNLOCKED;
 
 static void resetTelemetrySnapshot() {
+  telemetryWaiting = false;
+  telemetryPendingTarget = 0;
+  telemetryPendingReg = 0;
+  telemetryPendingTimeoutMs = SPEED_REPLY_TIMEOUT_MS;
+  lastTelemetry = 0;
+  lastSpeedPollMs = 0;
+  lastBmsCurrentPollMs = 0;
+  lastBmsSlowPollMs = 0;
+  lastEscSlowPollMs = 0;
+  bmsSlowStep = 0;
+  escSlowStep = 0;
+  bmsEverReplied = false;
+  bmsConsecutiveTimeouts = 0;
+  bmsBackoffUntilMs = 0;
+  diagSpeedTimeouts = 0;
+  diagBmsTimeouts = 0;
+  diagOtherTimeouts = 0;
+  diagLateReplies = 0;
+  diagLastSpeedRttMs = 0;
+  diagSpeedRttSumMs = 0;
+  diagSpeedRttCount = 0;
   passiveCmd64SpeedSeen = false;
   passiveCmd64SpeedMs = 0;
   diagCmd64AnyRx = 0;
@@ -1064,11 +1116,18 @@ void sendPair() {
 // Telemetry read
 // ============================================================
 
-void sendRead(uint8_t target, uint8_t reg, uint8_t readLen) {
+void sendRead(uint8_t target,
+              uint8_t reg,
+              uint8_t readLen,
+              unsigned long timeoutMs = SPEED_REPLY_TIMEOUT_MS) {
   uint8_t payload[1] = { readLen };
 
+  telemetryPendingTarget = target;
+  telemetryPendingReg = reg;
+  telemetryPendingTimeoutMs = timeoutMs;
   telemetryWaiting = true;
   telemetrySentAt = millis();
+  lastTelemetry = telemetrySentAt;
 
   sendNinebotPacket(
     target,
@@ -1115,7 +1174,31 @@ void handleTelemetryReply(const uint8_t* plain, size_t len) {
   if (len < 7 + dataLen) return;
 
   const uint8_t* data = plain + 7;
-  telemetryWaiting = false;
+  const unsigned long replyNowMs = millis();
+  const bool matchesPending =
+      telemetryWaiting &&
+      src == telemetryPendingTarget &&
+      reg == telemetryPendingReg;
+
+  if (matchesPending) {
+    const uint32_t rtt = (uint32_t)(replyNowMs - telemetrySentAt);
+    if (src == DEV_ESC && reg == REG_SPEED) {
+      diagLastSpeedRttMs = rtt;
+      diagSpeedRttSumMs += rtt;
+      ++diagSpeedRttCount;
+    }
+    telemetryWaiting = false;
+  } else if (telemetryWaiting) {
+    ++diagLateReplies;
+  }
+
+  // Any real BMS reply proves that the BMS path exists and immediately clears
+  // the bench/no-BMS backoff.
+  if (src == DEV_BATT) {
+    bmsEverReplied = true;
+    bmsConsecutiveTimeouts = 0;
+    bmsBackoffUntilMs = 0;
+  }
 
   if (src == DEV_ESC && reg == REG_DPC && dataLen >= 2) {
     uint16_t raw = (uint16_t)littleEndianValue(data, 2);
@@ -1965,7 +2048,7 @@ static void serviceDpc() {
     case DPC_WAIT_SETTLE:
       if (now - dpcLastAction >= 150) {
         Serial.println("[DPC] Lese 0x76 zur Kontrolle ...");
-        sendRead(DEV_ESC, REG_DPC, 2);
+        sendRead(DEV_ESC, REG_DPC, 2, 800);
         dpcLastAction = now;
         dpcState = DPC_WAIT_READBACK;
       }
@@ -1992,68 +2075,107 @@ void serviceTelemetry() {
   if (!isConnected || authState != AUTH_READY) return;
   if (dpcState != DPC_CONFIRMED && dpcState != DPC_FAILED) return;
 
-  unsigned long now = millis();
+  const unsigned long now = millis();
 
+  // A missing BMS must never stall the complete telemetry scheduler for 800 ms.
+  // Each request has its own timeout, and only the matching reply may clear it.
   if (telemetryWaiting) {
-    if (now - telemetrySentAt > 800) {
-      if (NB_TELEMETRY_DEBUG) Serial.println("Telemetry Timeout; fahre mit naechstem Register fort.");
-      telemetryWaiting = false;
-    } else {
+    if ((unsigned long)(now - telemetrySentAt) <= telemetryPendingTimeoutMs) {
       return;
+    }
+
+    const uint8_t timedTarget = telemetryPendingTarget;
+    const uint8_t timedReg = telemetryPendingReg;
+    telemetryWaiting = false;
+
+    if (timedTarget == DEV_ESC && timedReg == REG_SPEED) {
+      ++diagSpeedTimeouts;
+    } else if (timedTarget == DEV_BATT) {
+      ++diagBmsTimeouts;
+      if (bmsConsecutiveTimeouts < 255) ++bmsConsecutiveTimeouts;
+      if (bmsConsecutiveTimeouts >= 2) {
+        bmsBackoffUntilMs = now + BMS_BACKOFF_MS;
+      }
+    } else {
+      ++diagOtherTimeouts;
     }
   }
 
-  // One request at a time remains mandatory. 100 ms is only the minimum gap;
-  // a slower GATT/notify round trip automatically throttles this loop.
-  if (now - lastTelemetry < 100) return;
-  lastTelemetry = now;
-
-  // DPC needs only a slow watchdog, not a slot in every fast poll cycle.
-  if (dpcState == DPC_CONFIRMED && now - dpcLastPeriodicCheck >= 30000) {
+  // DPC watchdog stays low-rate and may briefly pre-empt one speed slot.
+  if (dpcState == DPC_CONFIRMED &&
+      (unsigned long)(now - dpcLastPeriodicCheck) >= 30000) {
     dpcLastPeriodicCheck = now;
-    sendRead(DEV_ESC, REG_DPC, 2);
+    sendRead(DEV_ESC, REG_DPC, 2, 800);
     return;
   }
-
-  struct Poll { uint8_t target, reg, len; };
-  // Speed every second request (~5 Hz target). Battery current is frequent for
-  // LOAD/REGEN; slow values share the remaining slots.
-  static const Poll poll[] = {
-    { DEV_ESC,  REG_SPEED,    2 }, { DEV_BATT, REG_BAT_CUR,  2 },
-    { DEV_ESC,  REG_SPEED,    2 }, { DEV_BATT, REG_BAT_CUR,  2 },
-    { DEV_ESC,  REG_SPEED,    2 }, { DEV_BATT, REG_BAT_VOLT, 2 },
-    { DEV_ESC,  REG_SPEED,    2 }, { DEV_BATT, REG_BAT_CUR,  2 },
-    { DEV_ESC,  REG_SPEED,    2 }, { DEV_BATT, REG_BAT_PCT,  2 },
-    { DEV_ESC,  REG_SPEED,    2 }, { DEV_BATT, REG_BAT_CUR,  2 },
-    { DEV_ESC,  REG_SPEED,    2 }, { DEV_ESC,  REG_MODE,     2 },
-    { DEV_ESC,  REG_SPEED,    2 }, { DEV_BATT, REG_BAT_CUR,  2 },
-    { DEV_ESC,  REG_SPEED,    2 }, { DEV_BATT, REG_BAT_TEMP, 2 },
-    { DEV_ESC,  REG_SPEED,    2 }, { DEV_BATT, REG_BAT_CUR,  2 },
-    { DEV_ESC,  REG_SPEED,    2 }, { DEV_ESC,  REG_ODO_LO,   2 },
-    { DEV_ESC,  REG_SPEED,    2 }, { DEV_ESC,  REG_ODO_HI,   2 }
-  };
-
-  const size_t pollCount = sizeof(poll) / sizeof(poll[0]);
-  const Poll &q = poll[telemetryStep];
-  telemetryStep = (telemetryStep + 1) % pollCount;
 
   const bool cmd64Fresh =
       passiveCmd64SpeedSeen &&
       (unsigned long)(now - passiveCmd64SpeedMs) <= CMD64_SPEED_FRESH_MS;
 
-  // In the original v7.14 table every second slot is REG_SPEED. If CMD64 is
-  // currently arriving, leave those slots intentionally idle instead of
-  // generating redundant CMD61 + REG26 traffic on the shared yellow wire.
-  // If CMD64 disappears for >1.2 s, the old REG26 polling automatically resumes.
-  if (cmd64Fresh && q.target == DEV_ESC && q.reg == REG_SPEED) {
-    ++diagReg26PollSkipped;
+  // Priority 1: speed. On this BLE117 phone path CMD64 is not forwarded, so
+  // REG26 is the real source. Target 5 Hz, independent of BMS/ODO/mode traffic.
+  if (!cmd64Fresh &&
+      (lastSpeedPollMs == 0 ||
+       (unsigned long)(now - lastSpeedPollMs) >= SPEED_POLL_INTERVAL_MS)) {
+    lastSpeedPollMs = now;
+    ++diagReg26PollSent;
+    sendRead(DEV_ESC, REG_SPEED, 2, SPEED_REPLY_TIMEOUT_MS);
     return;
   }
 
-  if (q.target == DEV_ESC && q.reg == REG_SPEED) {
-    ++diagReg26PollSent;
+  if (cmd64Fresh &&
+      (lastSpeedPollMs == 0 ||
+       (unsigned long)(now - lastSpeedPollMs) >= SPEED_POLL_INTERVAL_MS)) {
+    lastSpeedPollMs = now;
+    ++diagReg26PollSkipped;
   }
-  sendRead(q.target, q.reg, q.len);
+
+  // Do not stuff slow traffic immediately behind every request. 50 ms is enough
+  // to keep the shared link civilized while still leaving room between speed slots.
+  if ((unsigned long)(now - lastTelemetry) < 50) return;
+
+  const bool bmsBackoff =
+      bmsBackoffUntilMs != 0 &&
+      (long)(bmsBackoffUntilMs - now) > 0;
+
+  // Priority 2: battery current for LOAD/REGEN. If the bench PSU provides no
+  // BMS, two consecutive timeouts trigger a 30 s backoff instead of murdering
+  // the speed cadence forever.
+  if (!bmsBackoff &&
+      (lastBmsCurrentPollMs == 0 ||
+       (unsigned long)(now - lastBmsCurrentPollMs) >= BMS_CURRENT_INTERVAL_MS)) {
+    lastBmsCurrentPollMs = now;
+    sendRead(DEV_BATT, REG_BAT_CUR, 2, OPTIONAL_REPLY_TIMEOUT_MS);
+    return;
+  }
+
+  // Priority 3: ESC-side slow values. These do not depend on an external BMS.
+  if (lastEscSlowPollMs == 0 ||
+      (unsigned long)(now - lastEscSlowPollMs) >= ESC_SLOW_INTERVAL_MS) {
+    lastEscSlowPollMs = now;
+    switch (escSlowStep++ % 3) {
+      case 0: sendRead(DEV_ESC, REG_MODE,   2, SPEED_REPLY_TIMEOUT_MS); return;
+      case 1: sendRead(DEV_ESC, REG_ODO_LO, 2, SPEED_REPLY_TIMEOUT_MS); return;
+      default:sendRead(DEV_ESC, REG_ODO_HI, 2, SPEED_REPLY_TIMEOUT_MS); return;
+    }
+  }
+
+  // Priority 4: genuinely slow BMS values. One per 2.5 s slot.
+  if (!bmsBackoff &&
+      (lastBmsSlowPollMs == 0 ||
+       (unsigned long)(now - lastBmsSlowPollMs) >= BMS_SLOW_INTERVAL_MS)) {
+    lastBmsSlowPollMs = now;
+    switch (bmsSlowStep++ % 3) {
+      case 0: sendRead(DEV_BATT, REG_BAT_VOLT, 2, OPTIONAL_REPLY_TIMEOUT_MS); return;
+      case 1: sendRead(DEV_BATT, REG_BAT_PCT,  2, OPTIONAL_REPLY_TIMEOUT_MS); return;
+      default:sendRead(DEV_BATT, REG_BAT_TEMP, 2, OPTIONAL_REPLY_TIMEOUT_MS); return;
+    }
+  }
+
+  // Backoff expiry is a probe opportunity. Once the timer expires, the regular
+  // current slot above performs exactly one test request; a failed probe extends
+  // the backoff, while any BMS reply clears it immediately.
 }
 
 // ============================================================
@@ -2109,16 +2231,30 @@ static void serviceSpeedDiag() {
     Serial.printf("%lums", age);
   }
 
+  const float avgSpeedRtt =
+      diagSpeedRttCount ? (float)diagSpeedRttSumMs / (float)diagSpeedRttCount : 0.0f;
+  const bool bmsBackoff =
+      bmsBackoffUntilMs != 0 &&
+      (long)(bmsBackoffUntilMs - now) > 0;
+
   Serial.printf(
       " | REG26 rx=%lu (+%.1f/s) used=%lu ignored=%lu last=%.1f "
-      "pollSent=%lu pollSkip=%lu\n",
+      "pollSent=%lu pollSkip=%lu RTT=%lums/%.1fms "
+      "| TO speed=%lu bms=%lu other=%lu late=%lu BMS=%s\n",
       (unsigned long)n26Rx,
       (n26Rx - prev26Rx) * 1000.0f / elapsed,
       (unsigned long)n26Used,
       (unsigned long)n26Ign,
       (double)diagReg26LastSpeed,
       (unsigned long)n26Sent,
-      (unsigned long)n26Skip);
+      (unsigned long)n26Skip,
+      (unsigned long)diagLastSpeedRttMs,
+      (double)avgSpeedRtt,
+      (unsigned long)diagSpeedTimeouts,
+      (unsigned long)diagBmsTimeouts,
+      (unsigned long)diagOtherTimeouts,
+      (unsigned long)diagLateReplies,
+      bmsBackoff ? "BACKOFF" : (bmsEverReplied ? "ONLINE" : "PROBE"));
 
   prev64Any = n64Any;
   prev64Ok = n64Ok;
@@ -2137,8 +2273,8 @@ void ninebotTelemetryBegin() {
   resetTelemetrySnapshot();
 
   Serial.println();
-  Serial.println("Ninebot G30 BLE Telemetry v7.14 CMD64-SPEED-DIAG / self-bound auto-auth + target autoconnect");
-  Serial.println("[SPD-DIAG] Console diagnosis active: CMD64 vs REG26 source is reported every second.");
+  Serial.println("Ninebot G30 BLE Telemetry v7.14 FAST26-BMS-SAFE / self-bound auto-auth + target autoconnect");
+  Serial.println("[SPD-DIAG] FAST26 priority scheduler: 5 Hz speed, short optional timeouts, BMS backoff.");
   Serial.println("NinebotCrypto + one-time button bind then direct 0x5D auto-auth + 100ms scheduler");
   haveSegwayAppKey = loadSegwayAppKey();
   Serial.println(haveSegwayAppKey ? "[AUTH-APP] Segway-App-Key in NVS vorhanden." : "[AUTH-APP] Kein Segway-App-Key in NVS; Button-Fallback aktiv.");
