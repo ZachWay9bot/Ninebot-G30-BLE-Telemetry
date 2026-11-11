@@ -512,6 +512,19 @@ static void telemetrySetLink(bool connected, bool ready) {
 }
 
 static void telemetryClearMeasurements(bool connected) {
+  telemetryWaiting = false;
+  telemetryPendingTarget = 0;
+  telemetryPendingReg = 0;
+  telemetryPendingTimeoutMs = SPEED_REPLY_TIMEOUT_MS;
+  lastSpeedPollMs = 0;
+  lastBmsCurrentPollMs = 0;
+  lastBmsSlowPollMs = 0;
+  lastEscSlowPollMs = 0;
+  bmsSlowStep = 0;
+  escSlowStep = 0;
+  bmsEverReplied = false;
+  bmsConsecutiveTimeouts = 0;
+  bmsBackoffUntilMs = 0;
   passiveCmd64SpeedSeen = false;
   passiveCmd64SpeedMs = 0;
   portENTER_CRITICAL(&telemetryMux);
@@ -2213,7 +2226,7 @@ static void serviceSpeedDiag() {
       passiveCmd64SpeedSeen ? (unsigned long)(now - passiveCmd64SpeedMs) : 0xFFFFFFFFUL;
 
   const char* source = cmd64Fresh ? "CMD64" :
-                       (n26Used ? "REG26-FALLBACK" : "WAIT");
+                       (n26Used ? "REG26" : "WAIT");
 
   Serial.printf(
       "[SPD-DIAG] source=%s | CMD64 any=%lu (+%.1f/s) accepted=%lu (+%.1f/s) "
