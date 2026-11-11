@@ -381,6 +381,19 @@ static volatile bool passiveCmd64SpeedSeen = false;
 static volatile unsigned long passiveCmd64SpeedMs = 0;
 static const unsigned long CMD64_SPEED_FRESH_MS = 1200;
 
+// Always-on speed source diagnostics. These counters deliberately do not depend
+// on NB_TELEMETRY_DEBUG so a normal release build can prove which path is active.
+static volatile uint32_t diagCmd64AnyRx = 0;
+static volatile uint32_t diagCmd64Accepted = 0;
+static volatile uint32_t diagReg26Rx = 0;
+static volatile uint32_t diagReg26Used = 0;
+static volatile uint32_t diagReg26Ignored = 0;
+static volatile uint32_t diagReg26PollSent = 0;
+static volatile uint32_t diagReg26PollSkipped = 0;
+static volatile uint8_t diagCmd64LastDst = 0;
+static volatile uint8_t diagCmd64LastSpeed = 0;
+static volatile float diagReg26LastSpeed = NAN;
+
 // DPC register 0x76 setup/verification. Used only after AUTH_READY.
 enum DpcState {
   DPC_IDLE,
@@ -411,6 +424,16 @@ static portMUX_TYPE telemetryMux = portMUX_INITIALIZER_UNLOCKED;
 static void resetTelemetrySnapshot() {
   passiveCmd64SpeedSeen = false;
   passiveCmd64SpeedMs = 0;
+  diagCmd64AnyRx = 0;
+  diagCmd64Accepted = 0;
+  diagReg26Rx = 0;
+  diagReg26Used = 0;
+  diagReg26Ignored = 0;
+  diagReg26PollSent = 0;
+  diagReg26PollSkipped = 0;
+  diagCmd64LastDst = 0;
+  diagCmd64LastSpeed = 0;
+  diagReg26LastSpeed = NAN;
   portENTER_CRITICAL(&telemetryMux);
   telemetrySnapshot.speed_kmh = NAN;
   telemetrySnapshot.battery_percent = NAN;
@@ -1135,6 +1158,9 @@ void handleTelemetryReply(const uint8_t* plain, size_t len) {
 
   if (src == DEV_ESC && reg == REG_SPEED && dataLen >= 2) {
     const unsigned long nowMs = millis();
+    ++diagReg26Rx;
+    int16_t diagRaw = (int16_t)littleEndianValue(data, 2);
+    diagReg26LastSpeed = diagRaw / 10.0f;
     const bool cmd64Fresh =
         passiveCmd64SpeedSeen &&
         (unsigned long)(nowMs - passiveCmd64SpeedMs) <= CMD64_SPEED_FRESH_MS;
@@ -1142,16 +1168,20 @@ void handleTelemetryReply(const uint8_t* plain, size_t len) {
     // Keep REG26 only as compatibility fallback. A fresh passive CMD64 value
     // must never be overwritten by the slower app/register path.
     if (!cmd64Fresh) {
-      int16_t raw = (int16_t)littleEndianValue(data, 2);
-      float value = raw / 10.0f;
+      ++diagReg26Used;
+      int16_t raw = diagRaw;
+      float value = diagReg26LastSpeed;
       if (NB_TELEMETRY_DEBUG) Serial.printf(">>> SPEED REG26 fallback: %.1f km/h\n", value);
       portENTER_CRITICAL(&telemetryMux);
       telemetrySnapshot.speed_kmh = value;
       telemetrySnapshot.last_update_ms = nowMs;
       telemetrySnapshot.sequence++;
       portEXIT_CRITICAL(&telemetryMux);
-    } else if (NB_TELEMETRY_DEBUG) {
-      Serial.println(">>> SPEED REG26 ignored: fresh CMD64 speed active.");
+    } else {
+      ++diagReg26Ignored;
+      if (NB_TELEMETRY_DEBUG) {
+        Serial.println(">>> SPEED REG26 ignored: fresh CMD64 speed active.");
+      }
     }
     return;
   }
@@ -1266,33 +1296,48 @@ void handlePlainPacket(const uint8_t* plain,
   if (NB_PACKET_DEBUG) Serial.printf("SRC=0x%02X DST=0x%02X CMD=0x%02X ARG=0x%02X LEN=%u\n",
                                     src,dst,cmd,arg,plain[2]);
 
-  // Passive G30 dashboard-status frame. On the internal Ninebot bus the ESC
-  // sends command 0x64 to the BLE/dashboard board. Payload is:
-  // [state][battery][light][beep][speed][fault].
-  // Some BLE firmwares forward this frame to the phone session, others do not.
-  // When it is forwarded, prefer status[4] as the speed source because this is
-  // the same fast path used by the physical stock dashboard.
-  if (src == DEV_ESC && dst == DEV_BLE && cmd == 0x64 && len >= 13 && plain[2] >= 6) {
-    const bool light = plain[9] != 0;
-    const float speedKmh = (float)plain[11];
-    const unsigned long nowMs = millis();
+  // Always observe every decrypted CMD64 first. This tells us whether BLE117
+  // forwards the stock dashboard frame at all, even if it rewrites DST 0x21
+  // (BLE/dashboard) to DST 0x3E (phone).
+  if (src == DEV_ESC && cmd == 0x64) {
+    ++diagCmd64AnyRx;
+    diagCmd64LastDst = dst;
 
-    if (NB_TELEMETRY_DEBUG) {
-      Serial.printf(">>> DASH64: speed=%.0f km/h light=%s\n",
-                    speedKmh, light ? "ON" : "OFF");
+    // Stock six-byte status payload:
+    // [state][battery][light][beep][speed][fault]
+    if ((dst == DEV_BLE || dst == DEV_PHONE) && len >= 13 && plain[2] >= 6) {
+      const bool light = plain[9] != 0;
+      const uint8_t speedRaw = plain[11];
+      const float speedKmh = (float)speedRaw;
+      const unsigned long nowMs = millis();
+
+      ++diagCmd64Accepted;
+      diagCmd64LastSpeed = speedRaw;
+      passiveCmd64SpeedSeen = true;
+      passiveCmd64SpeedMs = nowMs;
+
+      // Print the first accepted frames immediately; the 1 Hz summary below
+      // then keeps the console readable.
+      if (diagCmd64Accepted <= 5) {
+        Serial.printf("[SPD-CMD64] ACCEPT src=%02X dst=%02X len=%u speed=%u km/h light=%u\n",
+                      src, dst, (unsigned)plain[2], (unsigned)speedRaw,
+                      light ? 1U : 0U);
+      }
+
+      portENTER_CRITICAL(&telemetryMux);
+      telemetrySnapshot.speed_kmh = speedKmh;
+      telemetrySnapshot.headlight_on = light;
+      telemetrySnapshot.headlight_valid = true;
+      telemetrySnapshot.last_update_ms = nowMs;
+      telemetrySnapshot.sequence++;
+      portEXIT_CRITICAL(&telemetryMux);
+      return;
     }
 
-    passiveCmd64SpeedSeen = true;
-    passiveCmd64SpeedMs = nowMs;
-
-    portENTER_CRITICAL(&telemetryMux);
-    telemetrySnapshot.speed_kmh = speedKmh;
-    telemetrySnapshot.headlight_on = light;
-    telemetrySnapshot.headlight_valid = true;
-    telemetrySnapshot.last_update_ms = nowMs;
-    telemetrySnapshot.sequence++;
-    portEXIT_CRITICAL(&telemetryMux);
-    return;
+    if (diagCmd64AnyRx <= 5) {
+      Serial.printf("[SPD-CMD64] SEEN-BUT-REJECTED src=%02X dst=%02X payloadLen=%u total=%u\n",
+                    src, dst, (unsigned)plain[2], (unsigned)len);
+    }
   }
 
   // ----------------------------------------------------------
@@ -2001,10 +2046,87 @@ void serviceTelemetry() {
   // generating redundant CMD61 + REG26 traffic on the shared yellow wire.
   // If CMD64 disappears for >1.2 s, the old REG26 polling automatically resumes.
   if (cmd64Fresh && q.target == DEV_ESC && q.reg == REG_SPEED) {
+    ++diagReg26PollSkipped;
     return;
   }
 
+  if (q.target == DEV_ESC && q.reg == REG_SPEED) {
+    ++diagReg26PollSent;
+  }
   sendRead(q.target, q.reg, q.len);
+}
+
+// ============================================================
+// Always-on speed-path console diagnostics
+// ============================================================
+
+static void serviceSpeedDiag() {
+  static unsigned long lastMs = 0;
+  static uint32_t prev64Any = 0;
+  static uint32_t prev64Ok = 0;
+  static uint32_t prev26Rx = 0;
+  static uint32_t prev26Used = 0;
+  static uint32_t prev26Ign = 0;
+  static uint32_t prev26Sent = 0;
+  static uint32_t prev26Skip = 0;
+
+  const unsigned long now = millis();
+  if ((unsigned long)(now - lastMs) < 1000) return;
+  const unsigned long elapsed = lastMs ? (unsigned long)(now - lastMs) : 1000UL;
+  lastMs = now;
+
+  const uint32_t n64Any = diagCmd64AnyRx;
+  const uint32_t n64Ok = diagCmd64Accepted;
+  const uint32_t n26Rx = diagReg26Rx;
+  const uint32_t n26Used = diagReg26Used;
+  const uint32_t n26Ign = diagReg26Ignored;
+  const uint32_t n26Sent = diagReg26PollSent;
+  const uint32_t n26Skip = diagReg26PollSkipped;
+
+  const bool cmd64Fresh =
+      passiveCmd64SpeedSeen &&
+      (unsigned long)(now - passiveCmd64SpeedMs) <= CMD64_SPEED_FRESH_MS;
+
+  const unsigned long age =
+      passiveCmd64SpeedSeen ? (unsigned long)(now - passiveCmd64SpeedMs) : 0xFFFFFFFFUL;
+
+  const char* source = cmd64Fresh ? "CMD64" :
+                       (n26Used ? "REG26-FALLBACK" : "WAIT");
+
+  Serial.printf(
+      "[SPD-DIAG] source=%s | CMD64 any=%lu (+%.1f/s) accepted=%lu (+%.1f/s) "
+      "dst=%02X speed=%u age=%s",
+      source,
+      (unsigned long)n64Any,
+      (n64Any - prev64Any) * 1000.0f / elapsed,
+      (unsigned long)n64Ok,
+      (n64Ok - prev64Ok) * 1000.0f / elapsed,
+      (unsigned)diagCmd64LastDst,
+      (unsigned)diagCmd64LastSpeed,
+      passiveCmd64SpeedSeen ? "" : "NEVER");
+
+  if (passiveCmd64SpeedSeen) {
+    Serial.printf("%lums", age);
+  }
+
+  Serial.printf(
+      " | REG26 rx=%lu (+%.1f/s) used=%lu ignored=%lu last=%.1f "
+      "pollSent=%lu pollSkip=%lu\n",
+      (unsigned long)n26Rx,
+      (n26Rx - prev26Rx) * 1000.0f / elapsed,
+      (unsigned long)n26Used,
+      (unsigned long)n26Ign,
+      (double)diagReg26LastSpeed,
+      (unsigned long)n26Sent,
+      (unsigned long)n26Skip);
+
+  prev64Any = n64Any;
+  prev64Ok = n64Ok;
+  prev26Rx = n26Rx;
+  prev26Used = n26Used;
+  prev26Ign = n26Ign;
+  prev26Sent = n26Sent;
+  prev26Skip = n26Skip;
 }
 
 // ============================================================
@@ -2015,7 +2137,8 @@ void ninebotTelemetryBegin() {
   resetTelemetrySnapshot();
 
   Serial.println();
-  Serial.println("Ninebot G30 BLE Telemetry v7.14 CMD64-SPEED / self-bound auto-auth + target autoconnect");
+  Serial.println("Ninebot G30 BLE Telemetry v7.14 CMD64-SPEED-DIAG / self-bound auto-auth + target autoconnect");
+  Serial.println("[SPD-DIAG] Console diagnosis active: CMD64 vs REG26 source is reported every second.");
   Serial.println("NinebotCrypto + one-time button bind then direct 0x5D auto-auth + 100ms scheduler");
   haveSegwayAppKey = loadSegwayAppKey();
   Serial.println(haveSegwayAppKey ? "[AUTH-APP] Segway-App-Key in NVS vorhanden." : "[AUTH-APP] Kein Segway-App-Key in NVS; Button-Fallback aktiv.");
@@ -2068,6 +2191,7 @@ void ninebotTelemetryLoop() {
   serviceAuth();
   serviceDpc();
   serviceTelemetry();
+  serviceSpeedDiag();
 
   if (!isConnected &&
       !doConnect &&
