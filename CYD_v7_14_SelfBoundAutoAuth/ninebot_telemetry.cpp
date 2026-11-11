@@ -1215,12 +1215,16 @@ void handleTelemetryReply(const uint8_t* plain, size_t len) {
 
   if (src == DEV_ESC && reg == REG_DPC && dataLen >= 2) {
     uint16_t raw = (uint16_t)littleEndianValue(data, 2);
+#if NB_RUNTIME_DIAG
     Serial.printf(">>> DPC READBACK 0x76 = 0x%04X (%u)\n", (unsigned)raw, (unsigned)raw);
+#endif
 
     if (raw == 1) {
       dpcState = DPC_CONFIRMED;
       dpcAttempts = 0;
+#if NB_RUNTIME_DIAG
       Serial.println("*** DPC 0x76 bestaetigt: EIN ***");
+#endif
     } else if (dpcAttempts < DPC_MAX_ATTEMPTS) {
       dpcState = DPC_NEED_WRITE;
       dpcLastAction = millis();
@@ -1414,11 +1418,13 @@ void handlePlainPacket(const uint8_t* plain,
 
       // Print the first accepted frames immediately; the 1 Hz summary below
       // then keeps the console readable.
+#if NB_RUNTIME_DIAG
       if (diagCmd64Accepted <= 5) {
         Serial.printf("[SPD-CMD64] ACCEPT src=%02X dst=%02X len=%u speed=%u km/h light=%u\n",
                       src, dst, (unsigned)plain[2], (unsigned)speedRaw,
                       light ? 1U : 0U);
       }
+#endif
 
       portENTER_CRITICAL(&telemetryMux);
       telemetrySnapshot.speed_kmh = speedKmh;
@@ -1430,10 +1436,12 @@ void handlePlainPacket(const uint8_t* plain,
       return;
     }
 
+#if NB_RUNTIME_DIAG
     if (diagCmd64AnyRx <= 5) {
       Serial.printf("[SPD-CMD64] SEEN-BUT-REJECTED src=%02X dst=%02X payloadLen=%u total=%u\n",
                     src, dst, (unsigned)plain[2], (unsigned)len);
     }
+#endif
   }
 
   // ----------------------------------------------------------
@@ -2195,6 +2203,7 @@ void serviceTelemetry() {
 // Always-on speed-path console diagnostics
 // ============================================================
 
+#if NB_RUNTIME_DIAG
 static void serviceSpeedDiag() {
   static unsigned long lastMs = 0;
   static uint32_t prev64Any = 0;
@@ -2278,6 +2287,10 @@ static void serviceSpeedDiag() {
   prev26Skip = n26Skip;
 }
 
+#else
+static inline void serviceSpeedDiag() {}
+#endif
+
 // ============================================================
 // Dashboard module API
 // ============================================================
@@ -2287,7 +2300,9 @@ void ninebotTelemetryBegin() {
 
   Serial.println();
   Serial.println("Ninebot G30 BLE Telemetry v7.14 FAST26-BMS-SAFE / self-bound auto-auth + target autoconnect");
+#if NB_RUNTIME_DIAG
   Serial.println("[SPD-DIAG] FAST26 priority scheduler: 5 Hz speed, short optional timeouts, BMS backoff.");
+#endif
   Serial.println("NinebotCrypto + one-time button bind then direct 0x5D auto-auth + 100ms scheduler");
   haveSegwayAppKey = loadSegwayAppKey();
   Serial.println(haveSegwayAppKey ? "[AUTH-APP] Segway-App-Key in NVS vorhanden." : "[AUTH-APP] Kein Segway-App-Key in NVS; Button-Fallback aktiv.");
