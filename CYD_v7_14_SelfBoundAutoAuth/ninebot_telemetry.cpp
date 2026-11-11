@@ -374,6 +374,13 @@ unsigned long telemetrySentAt = 0;
 unsigned long lastTelemetry = 0;
 uint8_t telemetryStep = 0;
 
+// Passive stock-dashboard speed path.
+// When BLE117 forwards ESC->BLE CMD64 to the phone session, status[4] is the
+// same integer km/h value used by the physical stock dashboard.
+static volatile bool passiveCmd64SpeedSeen = false;
+static volatile unsigned long passiveCmd64SpeedMs = 0;
+static const unsigned long CMD64_SPEED_FRESH_MS = 1200;
+
 // DPC register 0x76 setup/verification. Used only after AUTH_READY.
 enum DpcState {
   DPC_IDLE,
@@ -402,6 +409,8 @@ static NinebotTelemetrySnapshot telemetrySnapshot;
 static portMUX_TYPE telemetryMux = portMUX_INITIALIZER_UNLOCKED;
 
 static void resetTelemetrySnapshot() {
+  passiveCmd64SpeedSeen = false;
+  passiveCmd64SpeedMs = 0;
   portENTER_CRITICAL(&telemetryMux);
   telemetrySnapshot.speed_kmh = NAN;
   telemetrySnapshot.battery_percent = NAN;
@@ -428,6 +437,8 @@ static void telemetrySetLink(bool connected, bool ready) {
 }
 
 static void telemetryClearMeasurements(bool connected) {
+  passiveCmd64SpeedSeen = false;
+  passiveCmd64SpeedMs = 0;
   portENTER_CRITICAL(&telemetryMux);
   telemetrySnapshot.speed_kmh = NAN;
   telemetrySnapshot.battery_percent = NAN;
@@ -1123,14 +1134,25 @@ void handleTelemetryReply(const uint8_t* plain, size_t len) {
   }
 
   if (src == DEV_ESC && reg == REG_SPEED && dataLen >= 2) {
-    int16_t raw = (int16_t)littleEndianValue(data, 2);
-    float value = raw / 10.0f;
-    if (NB_TELEMETRY_DEBUG) Serial.printf(">>> SPEED: %.1f km/h\n", value);
-    portENTER_CRITICAL(&telemetryMux);
-    telemetrySnapshot.speed_kmh = value;
-    telemetrySnapshot.last_update_ms = millis();
-    telemetrySnapshot.sequence++;
-    portEXIT_CRITICAL(&telemetryMux);
+    const unsigned long nowMs = millis();
+    const bool cmd64Fresh =
+        passiveCmd64SpeedSeen &&
+        (unsigned long)(nowMs - passiveCmd64SpeedMs) <= CMD64_SPEED_FRESH_MS;
+
+    // Keep REG26 only as compatibility fallback. A fresh passive CMD64 value
+    // must never be overwritten by the slower app/register path.
+    if (!cmd64Fresh) {
+      int16_t raw = (int16_t)littleEndianValue(data, 2);
+      float value = raw / 10.0f;
+      if (NB_TELEMETRY_DEBUG) Serial.printf(">>> SPEED REG26 fallback: %.1f km/h\n", value);
+      portENTER_CRITICAL(&telemetryMux);
+      telemetrySnapshot.speed_kmh = value;
+      telemetrySnapshot.last_update_ms = nowMs;
+      telemetrySnapshot.sequence++;
+      portEXIT_CRITICAL(&telemetryMux);
+    } else if (NB_TELEMETRY_DEBUG) {
+      Serial.println(">>> SPEED REG26 ignored: fresh CMD64 speed active.");
+    }
     return;
   }
 
@@ -1245,15 +1267,29 @@ void handlePlainPacket(const uint8_t* plain,
                                     src,dst,cmd,arg,plain[2]);
 
   // Passive G30 dashboard-status frame. On the internal Ninebot bus the ESC
-  // sends command 0x64 to the BLE/dashboard board; byte 9 is the headlight
-  // state (0/1). Some BLE firmwares forward this frame to the phone session,
-  // others do not. When we see it, use it without sending any extra command.
+  // sends command 0x64 to the BLE/dashboard board. Payload is:
+  // [state][battery][light][beep][speed][fault].
+  // Some BLE firmwares forward this frame to the phone session, others do not.
+  // When it is forwarded, prefer status[4] as the speed source because this is
+  // the same fast path used by the physical stock dashboard.
   if (src == DEV_ESC && dst == DEV_BLE && cmd == 0x64 && len >= 13 && plain[2] >= 6) {
     const bool light = plain[9] != 0;
-    Serial.printf(">>> DASH LIGHT: %s (passive 0x64)\n", light ? "ON" : "OFF");
+    const float speedKmh = (float)plain[11];
+    const unsigned long nowMs = millis();
+
+    if (NB_TELEMETRY_DEBUG) {
+      Serial.printf(">>> DASH64: speed=%.0f km/h light=%s\n",
+                    speedKmh, light ? "ON" : "OFF");
+    }
+
+    passiveCmd64SpeedSeen = true;
+    passiveCmd64SpeedMs = nowMs;
+
     portENTER_CRITICAL(&telemetryMux);
+    telemetrySnapshot.speed_kmh = speedKmh;
     telemetrySnapshot.headlight_on = light;
     telemetrySnapshot.headlight_valid = true;
+    telemetrySnapshot.last_update_ms = nowMs;
     telemetrySnapshot.sequence++;
     portEXIT_CRITICAL(&telemetryMux);
     return;
@@ -1955,6 +1991,19 @@ void serviceTelemetry() {
   const size_t pollCount = sizeof(poll) / sizeof(poll[0]);
   const Poll &q = poll[telemetryStep];
   telemetryStep = (telemetryStep + 1) % pollCount;
+
+  const bool cmd64Fresh =
+      passiveCmd64SpeedSeen &&
+      (unsigned long)(now - passiveCmd64SpeedMs) <= CMD64_SPEED_FRESH_MS;
+
+  // In the original v7.14 table every second slot is REG_SPEED. If CMD64 is
+  // currently arriving, leave those slots intentionally idle instead of
+  // generating redundant CMD61 + REG26 traffic on the shared yellow wire.
+  // If CMD64 disappears for >1.2 s, the old REG26 polling automatically resumes.
+  if (cmd64Fresh && q.target == DEV_ESC && q.reg == REG_SPEED) {
+    return;
+  }
+
   sendRead(q.target, q.reg, q.len);
 }
 
@@ -1966,7 +2015,7 @@ void ninebotTelemetryBegin() {
   resetTelemetrySnapshot();
 
   Serial.println();
-  Serial.println("Ninebot G30 BLE Telemetry v7.14 / self-bound auto-auth + target autoconnect + fast telemetry + DPC verify");
+  Serial.println("Ninebot G30 BLE Telemetry v7.14 CMD64-SPEED / self-bound auto-auth + target autoconnect");
   Serial.println("NinebotCrypto + one-time button bind then direct 0x5D auto-auth + 100ms scheduler");
   haveSegwayAppKey = loadSegwayAppKey();
   Serial.println(haveSegwayAppKey ? "[AUTH-APP] Segway-App-Key in NVS vorhanden." : "[AUTH-APP] Kein Segway-App-Key in NVS; Button-Fallback aktiv.");
