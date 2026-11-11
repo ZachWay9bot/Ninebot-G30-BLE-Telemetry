@@ -1,6 +1,16 @@
 #ifndef NINEBOT_TELEMETRY_H
 #define NINEBOT_TELEMETRY_H
 
+// ============================================================
+// Runtime console diagnostics
+// 0 = quiet riding mode: no continuous telemetry/Delta debug chatter.
+//     RELAY:0 / RELAY:1 output remains ALWAYS active.
+// 1 = enable SPD-DIAG, CMD64 diagnostics and extra Delta text.
+// ============================================================
+#ifndef NB_RUNTIME_DIAG
+#define NB_RUNTIME_DIAG 0
+#endif
+
 #include <Arduino.h>
 
 struct NinebotTelemetrySnapshot {
